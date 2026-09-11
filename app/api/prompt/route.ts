@@ -1,89 +1,154 @@
-import OpenAI from 'openai'
-import { ProjectBibleSchema } from '@/lib/project-schema'
-import { getSupabaseAdmin } from '@/lib/supabase-server'
+import { NextRequest, NextResponse } from "next/server";
 
-export const runtime = 'nodejs'
-
-const directorSystem = `You are an expert AI film director, concept artist, cinematographer and prompt engineer.
-Turn a rough film idea into a production-ready project bible.
-Prioritize identity continuity, cinematic blocking, production design and reference-friendly prompts.
-Avoid copyrighted character imitation and do not mention living artists.
-Prompts for image/video generation must be concise but production-grade: subject identity, wardrobe, environment, lighting, camera, motion, continuity.
-Return only data matching the required schema.`
-
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const { idea } = await req.json()
-    if (!idea || typeof idea !== 'string') {
-      return Response.json({ error: 'idea is required' }, { status: 400 })
+    const body = await req.json();
+    const idea = body?.idea?.trim();
+
+    if (!idea) {
+      return NextResponse.json(
+        { error: "Missing idea" },
+        { status: 400 }
+      );
     }
 
-    const apiKey = process.env.GROQ_API_KEY
-    if (!apiKey) return Response.json({ error: 'GROQ_API_KEY is not configured' }, { status: 500 })
+    const apiKey = process.env.GROQ_API_KEY;
+    const model = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 
-    const client = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
-    const jsonSchema = zodToJsonSchemaForGroq()
-
-    const completion = await client.chat.completions.create({
-      model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
-      temperature: 0.35,
-      messages: [
-        { role: 'system', content: directorSystem },
-        { role: 'user', content: `Develop this film idea:\n${idea}\nCreate 6 storyboard shots by default.` },
-      ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'project_bible',
-          strict: true,
-          schema: jsonSchema,
-        },
-      },
-    })
-
-    const raw = completion.choices[0]?.message?.content
-    if (!raw) throw new Error('Groq returned an empty response')
-    const bible = ProjectBibleSchema.parse(JSON.parse(raw))
-
-    const supabase = getSupabaseAdmin()
-    if (supabase) {
-      await supabase.from('projects').insert({
-        title: bible.project.title,
-        idea,
-        bible,
-      })
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "GROQ_API_KEY is not configured" },
+        { status: 500 }
+      );
     }
 
-    return Response.json({ bible })
-  } catch (error: any) {
-    return Response.json({ error: error?.message || 'Prompt Director failed' }, { status: 500 })
-  }
+    const systemPrompt = `
+You are an expert AI film director and visual development supervisor.
+
+Convert the user's film idea into a structured production bible.
+
+Return VALID JSON ONLY.
+
+Required JSON structure:
+
+{
+  "project": {
+    "title": "",
+    "genre": "",
+    "logline": "",
+    "visualStyle": ""
+  },
+  "character": {
+    "name": "",
+    "age": "",
+    "appearance": "",
+    "costume": "",
+    "personality": "",
+    "characterPrompt": ""
+  },
+  "environment": {
+    "location": "",
+    "architecture": "",
+    "lighting": "",
+    "weather": "",
+    "environmentPrompt": ""
+  },
+  "cinematography": {
+    "lens": "",
+    "cameraMovement": "",
+    "lightingStyle": "",
+    "colorPalette": ""
+  },
+  "storyboard": [
+    {
+      "shot": 1,
+      "duration": 3,
+      "description": "",
+      "camera": "",
+      "imagePrompt": "",
+      "videoPrompt": ""
+    }
+  ]
 }
 
-function zodToJsonSchemaForGroq() {
-  // Explicit JSON Schema keeps V0.1 independent from helper-library version changes.
-  const string = { type: 'string' }
-  return {
-    type: 'object', additionalProperties: false,
-    properties: {
-      project: { type: 'object', additionalProperties: false, properties: {
-        title: string, logline: string, genre: string, visualStyle: string, aspectRatio: string,
-      }, required: ['title','logline','genre','visualStyle','aspectRatio'] },
-      character: { type: 'object', additionalProperties: false, properties: {
-        name: string, role: string, appearance: string, costume: string, personality: string, characterPrompt: string,
-      }, required: ['name','role','appearance','costume','personality','characterPrompt'] },
-      environment: { type: 'object', additionalProperties: false, properties: {
-        location: string, architecture: string, lighting: string, weather: string, environmentPrompt: string,
-      }, required: ['location','architecture','lighting','weather','environmentPrompt'] },
-      cinematography: { type: 'object', additionalProperties: false, properties: {
-        lenses: { type: 'array', items: string }, cameraLanguage: string, lightingLanguage: string,
-        colorPalette: { type: 'array', items: string },
-      }, required: ['lenses','cameraLanguage','lightingLanguage','colorPalette'] },
-      shots: { type: 'array', minItems: 4, maxItems: 10, items: { type: 'object', additionalProperties: false, properties: {
-        id: string, title: string, duration: { type: 'number' }, framing: string, lens: string,
-        cameraMotion: string, action: string, imagePrompt: string, videoPrompt: string,
-      }, required: ['id','title','duration','framing','lens','cameraMotion','action','imagePrompt','videoPrompt'] } },
-    },
-    required: ['project','character','environment','cinematography','shots'],
+Create exactly 6 storyboard shots.
+Keep prompts cinematic, production-ready, and suitable for AI image/video generation.
+`;
+
+    const groqResponse = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.7,
+          response_format: {
+            type: "json_object",
+          },
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: idea,
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!groqResponse.ok) {
+      const errorText = await groqResponse.text();
+
+      return NextResponse.json(
+        {
+          error: "Groq API request failed",
+          details: errorText,
+        },
+        { status: groqResponse.status }
+      );
+    }
+
+    const data = await groqResponse.json();
+
+    const content = data?.choices?.[0]?.message?.content;
+
+    if (!content) {
+      return NextResponse.json(
+        { error: "Groq returned empty response" },
+        { status: 500 }
+      );
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return NextResponse.json(
+        {
+          error: "Groq response was not valid JSON",
+          raw: content,
+        },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(parsed);
+  } catch (error) {
+    console.error(error);
+
+    return NextResponse.json(
+      {
+        error: "Prompt Director failed",
+      },
+      { status: 500 }
+    );
   }
 }
